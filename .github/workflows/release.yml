@@ -19,10 +19,13 @@ on:
   push:
     tags:
       - 'v*'
-  # Also runnable from the Actions tab (or the API) against a tag ref, for when
-  # a tag-push event doesn't fire the run on its own. Dispatched on a tag,
-  # github.ref_name is that tag, so every step below behaves the same as a push.
+  # Also runnable from the Actions tab: fill in existing remote tag name
   workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Existing remote tag (eg v1.0.5). Leave empty for tag‑push trigger'
+        required: false
+        type: string
 
 permissions:
   contents: write
@@ -31,6 +34,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve effective tag
+        id: resolve_tag
+        run: |
+          if [[ -n "${{ github.event.inputs.tag_name }}" ]]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -41,28 +53,19 @@ jobs:
 
       - name: Use committed native binaries (skip the cargo-ndk step in CI)
         # native/*/prebuilt/<abi>/* are committed; touching them newer than the
-        # sources makes build.sh package them as-is instead of needing Rust+NDK.
+        # sources makes build.sh package them as‑is instead of needing Rust+NDK.
         run: find native -path '*/prebuilt/*' -type f -exec touch {} +
 
-      - name: Build the release zips (fork, inject, nopif on TEESimulator-RS)
+      - name: Build the release zips (fork, inject, nopif on TEESimulator‑RS)
         run: bash build.sh
 
       - name: Checksums for the release
-        # Published so anyone can verify the exact zip they flashed, and match
-        # the shipped native binaries against a rebuild. The committed prebuilts
-        # are hashed (not copies unpacked from a zip) because those are the very
-        # bytes .github/workflows/native.yml produces, so a rerun of that
-        # workflow is directly comparable.
-        #
-        # Only the zip lines are live: `sha256sum -c SHA256SUMS.txt` next to the
-        # downloaded files checks them and skips the commented binary lines,
-        # which name repo paths a downloader doesn't have.
         run: |
           set -eu
           {
-            echo "# AlwaysStrong ${GITHUB_REF_NAME} - sha256"
+            echo "# AlwaysStrong ${{ steps.resolve_tag.outputs.tag }} - sha256"
             echo "# Release zips, verify with: sha256sum -c SHA256SUMS.txt"
-            ( cd out && sha256sum AlwaysStrong-*.zip )
+            ( cd out && sha256sum AlwaysStrong‑*.zip )
             echo "#"
             echo "# Native binaries shipped inside those zips, built from"
             echo "# native/asfetch/src and native/watcher/src by native.yml."
@@ -73,7 +76,7 @@ jobs:
 
       - name: Release notes from CHANGELOG
         run: |
-          awk -v v="## ${GITHUB_REF_NAME}" '
+          awk -v v="## ${{ steps.resolve_tag.outputs.tag }}" '
             $0==v {f=1; next}
             /^## / {f=0}
             f {print}
@@ -96,48 +99,42 @@ jobs:
           echo "----- notes -----"; cat RELEASE_NOTES.md
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action‑gh‑release@v2
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag_name != ''
         with:
-          name: ${{ github.ref_name }}
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          name: ${{ steps.resolve_tag.outputs.tag }}
           body_path: RELEASE_NOTES.md
           files: |
-            out/AlwaysStrong-*.zip
+            out/AlwaysStrong‑*.zip
             SHA256SUMS.txt
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
 
       - name: Point the update manifests at this release
-        # Installed modules poll their updateJson, so it has to name a release
-        # that already exists — hence this runs after publish. Never fails the
-        # release: a bad push here costs an edit, not the build.
-        #
-        # The three release lines each carry an updateJson (fork -> update.json,
-        # inject -> update-inject.json, nopif -> update-nopif.json).
-        continue-on-error: true
+        continue‑on‑error: true
         run: |
           set -eu
-          tag="${GITHUB_REF_NAME}"
-          git fetch --no-tags origin +refs/heads/main:refs/heads/main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" main; then
+          tag="${{ steps.resolve_tag.outputs.tag }}"
+          git fetch --no‑tags origin +refs/heads/main:refs/heads/main
+          if ! git merge‑base --is‑ancestor "$GITHUB_SHA" main; then
             echo "::notice::tag $tag is not on main — leaving the manifests alone"
             exit 0
           fi
           git checkout main
-          # all lines carry the same version — module/module.prop defines it once
           ver=$(sed -n 's/^version=//p' module/module.prop)
           code=$(sed -n 's/^versionCode=//p' module/module.prop)
           write_manifest() {
-            # $1 manifest file, $2 zip file name
             printf '{\n  "version": "%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/%s/%s",\n  "changelog": "https://raw.githubusercontent.com/%s/main/CHANGELOG.md"\n}\n' \
               "$ver" "$code" "$GITHUB_REPOSITORY" "$tag" "$2" "$GITHUB_REPOSITORY" > "$1"
           }
-          write_manifest update.json        "AlwaysStrong-${ver}.zip"
-          write_manifest update-inject.json "AlwaysStrong-${ver}-inject.zip"
-          write_manifest update-nopif.json  "AlwaysStrong-${ver}-nopif.zip"
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add update.json update-inject.json update-nopif.json
+          write_manifest update.json        "AlwaysStrong‑${ver}.zip"
+          write_manifest update‑inject.json "AlwaysStrong‑${ver}‑inject.zip"
+          write_manifest update‑nopif.json  "AlwaysStrong‑${ver}‑nopif.zip"
+          git config user.name  "github‑actions[bot]"
+          git config user.email "github‑actions[bot]@users.noreply.github.com"
+          git add update.json update‑inject.json update‑nopif.json
           git diff --cached --quiet && { echo "manifests already current"; exit 0; }
           git commit -m "chore: point update manifests at $tag"
           git push origin main
