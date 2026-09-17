@@ -1,31 +1,12 @@
-name: Release
-
-# Tag a version (e.g. `git tag v1.0.5 && git push origin v1.0.5`) and this builds
-# the installable zips on GitHub's runners and attaches them to the release.
-# They are produced from source here - never uploaded by hand.
-#
-# One tag ships the three release lines, all on the default TEESimulator-RS
-# keystore and all built from this tree:
-#   AlwaysStrong-<ver>.zip           PlayIntegrityFork  + TEESimulator-RS
-#   AlwaysStrong-<ver>-inject.zip    PlayIntegrityFix   + TEESimulator-RS
-#   AlwaysStrong-<ver>-nopif.zip     PIF-less / Lite    + TEESimulator-RS
-#
-# The alternative keystore engines - TrickyStoreOSS (-TSOSS) and TEESimulator /
-# JingMatrix (-TEESIM) - are never released. They stay buildable
-# (`build.sh --engine trickystoreoss|teesim`) and the nightly workflow produces
-# them as artifacts; that is where they live.
-
 on:
   push:
     tags:
       - 'v*'
-  # Also runnable from the Actions tab: fill in existing remote tag name
   workflow_dispatch:
     inputs:
-      tag_name:
-        description: 'Existing remote tag (eg v1.0.5). Leave empty for tag‑push trigger'
+      override_tag:
+        description: "Existing remote git tag (vX.Y.Z). Leave empty for tag‑push trigger"
         required: false
-        type: string
 
 permissions:
   contents: write
@@ -34,13 +15,13 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve effective tag
-        id: resolve_tag
+      - name: Compute effective tag
+        id: meta
         run: |
-          if [[ -n "${{ github.event.inputs.tag_name }}" ]]; then
-            echo "tag=${{ github.event.inputs.tag_name }}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${{ github.event.inputs.override_tag }}" ]]; then
+            echo "tag=${{ github.event.inputs.override_tag }}" >> $GITHUB_OUTPUT
           else
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Checkout
@@ -51,32 +32,30 @@ jobs:
       - name: Install packaging tools
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zip unzip
 
-      - name: Use committed native binaries (skip the cargo-ndk step in CI)
-        # native/*/prebuilt/<abi>/* are committed; touching them newer than the
-        # sources makes build.sh package them as‑is instead of needing Rust+NDK.
+      - name: Use committed native binaries
         run: find native -path '*/prebuilt/*' -type f -exec touch {} +
 
-      - name: Build the release zips (fork, inject, nopif on TEESimulator‑RS)
+      - name: Build the release zips
         run: bash build.sh
 
       - name: Checksums for the release
         run: |
           set -eu
           {
-            echo "# AlwaysStrong ${{ steps.resolve_tag.outputs.tag }} - sha256"
+            echo "# AlwaysStrong ${{ steps.meta.outputs.tag }} - sha256"
             echo "# Release zips, verify with: sha256sum -c SHA256SUMS.txt"
-            ( cd out && sha256sum AlwaysStrong‑*.zip )
+            ( cd out && sha256sum AlwaysStrong-*.zip )
             echo "#"
             echo "# Native binaries shipped inside those zips, built from"
             echo "# native/asfetch/src and native/watcher/src by native.yml."
             echo "# Reference only - rerun that workflow to reproduce them."
             find native -path '*/prebuilt/*' -type f | sort | xargs sha256sum | sed 's/^/# /'
           } > SHA256SUMS.txt
-          echo "----- SHA256SUMS.txt -----"; cat SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Release notes from CHANGELOG
         run: |
-          awk -v v="## ${{ steps.resolve_tag.outputs.tag }}" '
+          awk -v v="## ${{ steps.meta.outputs.tag }}" '
             $0==v {f=1; next}
             /^## / {f=0}
             f {print}
@@ -91,34 +70,34 @@ jobs:
             cat SHA256SUMS.txt
             echo '```'
             echo
-            echo "Every zip here is built from this tag by \`.github/workflows/release.yml\` on a"
+            echo "Every zip here is built from this tag by `.github/workflows/release.yml` on a"
             echo "GitHub runner and is never uploaded by hand. The two native binaries are plain"
-            echo "Rust, with full source in \`native/asfetch\` and \`native/watcher\`; rerun"
-            echo "\`.github/workflows/native.yml\` to rebuild them and compare the hashes above."
+            echo "Rust, with full source in `native/asfetch` and `native/watcher`; rerun"
+            echo "`.github/workflows/native.yml` to rebuild them and compare the hashes above."
           } >> RELEASE_NOTES.md
-          echo "----- notes -----"; cat RELEASE_NOTES.md
 
       - name: Publish release
-        uses: softprops/action‑gh‑release@v2
-        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag_name != ''
+        uses: softprops/action-gh-release@v2
+        # 有手动输入tag OR 当前ref是tag，才执行发布
+        if: github.event.inputs.override_tag != '' || startsWith(github.ref, 'refs/tags/')
         with:
-          tag_name: ${{ steps.resolve_tag.outputs.tag }}
-          name: ${{ steps.resolve_tag.outputs.tag }}
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.tag }}
           body_path: RELEASE_NOTES.md
           files: |
-            out/AlwaysStrong‑*.zip
+            out/AlwaysStrong-*.zip
             SHA256SUMS.txt
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
 
       - name: Point the update manifests at this release
-        continue‑on‑error: true
+        continue-on-error: true
         run: |
           set -eu
-          tag="${{ steps.resolve_tag.outputs.tag }}"
-          git fetch --no‑tags origin +refs/heads/main:refs/heads/main
-          if ! git merge‑base --is‑ancestor "$GITHUB_SHA" main; then
+          tag="${{ steps.meta.outputs.tag }}"
+          git fetch --no-tags origin +refs/heads/main:refs/heads/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" main; then
             echo "::notice::tag $tag is not on main — leaving the manifests alone"
             exit 0
           fi
@@ -129,12 +108,12 @@ jobs:
             printf '{\n  "version": "%s",\n  "versionCode": %s,\n  "zipUrl": "https://github.com/%s/releases/download/%s/%s",\n  "changelog": "https://raw.githubusercontent.com/%s/main/CHANGELOG.md"\n}\n' \
               "$ver" "$code" "$GITHUB_REPOSITORY" "$tag" "$2" "$GITHUB_REPOSITORY" > "$1"
           }
-          write_manifest update.json        "AlwaysStrong‑${ver}.zip"
-          write_manifest update‑inject.json "AlwaysStrong‑${ver}‑inject.zip"
-          write_manifest update‑nopif.json  "AlwaysStrong‑${ver}‑nopif.zip"
-          git config user.name  "github‑actions[bot]"
-          git config user.email "github‑actions[bot]@users.noreply.github.com"
-          git add update.json update‑inject.json update‑nopif.json
+          write_manifest update.json        "AlwaysStrong-${ver}.zip"
+          write_manifest update-inject.json "AlwaysStrong-${ver}-inject.zip"
+          write_manifest update-nopif.json  "AlwaysStrong-${ver}-nopif.zip"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add update.json update-inject.json update-nopif.json
           git diff --cached --quiet && { echo "manifests already current"; exit 0; }
           git commit -m "chore: point update manifests at $tag"
           git push origin main
